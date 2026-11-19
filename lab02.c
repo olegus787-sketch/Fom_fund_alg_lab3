@@ -1,7 +1,148 @@
-#include "common.h"
-
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+typedef enum {
+    OK, END, INVALID, RANGE, MEMORY, IO, NOT_FOUND, DUPLICATE, DOMAIN
+} Status;
+
+typedef struct {
+    char *data;
+    size_t len, cap;
+} Buffer;
+
+/* Ввод, проверка и обработка ошибок. */
+
+static Status reserve(void **out, void *old, size_t *cap, size_t needed, size_t elem_size)
+{
+    if (!out || !cap || !elem_size) return INVALID;
+    if (needed <= *cap) {
+        *out = old;
+        return OK;
+    }
+    size_t max_count = SIZE_MAX / elem_size;
+    if (needed > max_count) return RANGE;
+
+    /* Увеличиваем запас вдвое, когда это позволяет размер. */
+    size_t new_cap = needed;
+    if (*cap && *cap <= max_count / 2 && *cap * 2 > needed) {
+        new_cap = *cap * 2;
+    }
+    void *new_memory = realloc(old, new_cap * elem_size);
+    if (!new_memory) return MEMORY;
+    *out = new_memory;
+    *cap = new_cap;
+    return OK;
+}
+
+static Status append_char(Buffer *b, int c)
+{
+    if (!b || c < 0 || c > 255) return INVALID;
+    if (b->len > SIZE_MAX - 2) return RANGE;
+    void *p;
+    Status st = reserve(&p, b->data, &b->cap, b->len + 2, 1);
+    if (st != OK) return st;
+    b->data = p;
+    ((unsigned char *)b->data)[b->len++] = (unsigned char)c;
+    b->data[b->len] = '\0';
+    return OK;
+}
+
+static Status read_line(FILE *in, Buffer *b)
+{
+    if (!in || !b) return INVALID;
+    b->len = 0;
+    if (b->data) b->data[0] = '\0';
+    int c;
+    while ((c = fgetc(in)) != EOF && c != '\n') {
+        if (c == 0) {
+            while ((c = fgetc(in)) != EOF && c != '\n') {}
+            return ferror(in) ? IO : INVALID;
+        }
+        Status st = append_char(b, c);
+        if (st != OK) return st;
+    }
+    if (ferror(in)) return IO;
+    if (c == EOF && !b->len) return END;
+    if (!b->data) {
+        Status st = append_char(b, 0);
+        if (st != OK) return st;
+        b->len = 0;
+    }
+    if (b->len && b->data[b->len - 1] == '\r') b->data[--b->len] = '\0';
+    return OK;
+}
+
+static Status arg_count(int argc, char **argv, int min, int max)
+{
+    if (!argv || argc < min || argc > max) return INVALID;
+    for (int i = 1; i < argc; ++i) if (!argv[i] || !*argv[i]) return INVALID;
+    return OK;
+}
+
+static Status split(char *line, char **fields, size_t cap, size_t *count)
+{
+    if (!line || !fields || !count) return INVALID;
+    *count = 0;
+    while (*line) {
+        while (isspace((unsigned char)*line)) ++line;
+        if (!*line) break;
+        if (*count == cap) return INVALID;
+        fields[(*count)++] = line;
+        while (*line && !isspace((unsigned char)*line)) ++line;
+        if (*line) *line++ = '\0';
+    }
+    return OK;
+}
+
+static Status unsigned_number(const char *s, uintmax_t max, uintmax_t *out)
+{
+    if (!s || !*s || !out) return INVALID;
+    uintmax_t value = 0;
+    for (; *s; ++s) {
+        if (*s < '0' || *s > '9') return INVALID;
+        unsigned digit = (unsigned)(*s - '0');
+        if (digit > max || value > (max - digit) / 10) return RANGE;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return OK;
+}
+
+static Status digits(const char *s, size_t n)
+{
+    if (!s || strlen(s) != n) return INVALID;
+    for (size_t i = 0; i < n; ++i) if (s[i] < '0' || s[i] > '9') return INVALID;
+    return OK;
+}
+
+static int int_order(uintmax_t lhs, uintmax_t rhs)
+{
+    if (lhs < rhs) return -1;
+    if (lhs > rhs) return 1;
+    return 0;
+}
+
+static void report(Status status)
+{
+    const char *messages[] = {"ok", "unexpected end of input", "invalid input",
+        "value out of range", "out of memory", "I/O error", "not found",
+        "duplicate value", "operation outside its domain"};
+    if (status != OK && status >= END && status <= DOMAIN)
+        fprintf(stderr, "%s\n", messages[status]);
+}
+
+static int result(Status status)
+{
+    if (status == OK && fflush(stdout) == EOF) status = IO;
+    report(status);
+    return status == OK ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+/* Решение задачи. */
 enum { MINUTES = 1440 };
 typedef struct { uintmax_t id; unsigned start, end; } Talk;
 
@@ -13,22 +154,6 @@ static int by_id(const void *a, const void *b)
 static int by_end(const void *a, const void *b)
 {
     return int_order(((const Talk *)a)->end, ((const Talk *)b)->end);
-}
-
-/* Tree entry i stores the sum over the interval ending at i of length i & -i. */
-static void room_update(size_t *tree, unsigned i, bool add)
-{
-    for (; i <= MINUTES; i += i & (0u - i)) {
-        if (add) ++tree[i];
-        else --tree[i];
-    }
-}
-
-static size_t room_count(const size_t *tree, unsigned i)
-{
-    size_t sum = 0;
-    for (; i; i &= i - 1) sum += tree[i];
-    return sum;
 }
 
 static Status schedule(const Talk *talks, size_t n, size_t halls, size_t *answer)
@@ -53,21 +178,18 @@ static Status schedule(const Talk *talks, size_t n, size_t halls, size_t *answer
     }
     qsort(ordered, n, sizeof *ordered, by_end);
 
-    size_t tree[MINUTES + 1] = {0};
-    for (unsigned i = 1; i <= MINUTES; i *= 2) tree[i] = halls;
+    /* free_at[t] — сколько залов освободилось в минуту t. */
+    size_t free_at[MINUTES] = {0};
+    free_at[0] = halls;
     size_t selected = 0;
     for (size_t i = 0; i < n; ++i) {
-        unsigned limit = ordered[i].start + 1;
-        size_t count = room_count(tree, limit);
-        if (!count) continue;
-        unsigned lo = 1, hi = limit;
-        while (lo < hi) {
-            unsigned middle = lo + (hi - lo) / 2;
-            if (room_count(tree, middle) < count) lo = middle + 1;
-            else hi = middle;
-        }
-        room_update(tree, lo, false);
-        room_update(tree, ordered[i].end + 1, true);
+        int minute = (int)ordered[i].start;
+        while (minute >= 0 && free_at[minute] == 0) --minute;
+        if (minute < 0) continue;
+
+        /* Берём самый поздний подходящий зал, оставляя более ранние свободными. */
+        --free_at[minute];
+        ++free_at[ordered[i].end];
         ++selected;
     }
     free(ordered);

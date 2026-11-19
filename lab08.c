@@ -1,12 +1,128 @@
-#include "common.h"
-
 #include <ctype.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum {
+    OK, END, INVALID, RANGE, MEMORY, IO, NOT_FOUND, DUPLICATE, DOMAIN
+} Status;
+
+typedef struct {
+    char *data;
+    size_t len, cap;
+} Buffer;
+
+/* Ввод, проверка и обработка ошибок. */
+
+static Status reserve(void **out, void *old, size_t *cap, size_t needed, size_t elem_size)
+{
+    if (!out || !cap || !elem_size) return INVALID;
+    if (needed <= *cap) {
+        *out = old;
+        return OK;
+    }
+    size_t max_count = SIZE_MAX / elem_size;
+    if (needed > max_count) return RANGE;
+
+    /* Увеличиваем запас вдвое, когда это позволяет размер. */
+    size_t new_cap = needed;
+    if (*cap && *cap <= max_count / 2 && *cap * 2 > needed) {
+        new_cap = *cap * 2;
+    }
+    void *new_memory = realloc(old, new_cap * elem_size);
+    if (!new_memory) return MEMORY;
+    *out = new_memory;
+    *cap = new_cap;
+    return OK;
+}
+
+static Status append_char(Buffer *b, int c)
+{
+    if (!b || c < 0 || c > 255) return INVALID;
+    if (b->len > SIZE_MAX - 2) return RANGE;
+    void *p;
+    Status st = reserve(&p, b->data, &b->cap, b->len + 2, 1);
+    if (st != OK) return st;
+    b->data = p;
+    ((unsigned char *)b->data)[b->len++] = (unsigned char)c;
+    b->data[b->len] = '\0';
+    return OK;
+}
+
+static Status arg_count(int argc, char **argv, int min, int max)
+{
+    if (!argv || argc < min || argc > max) return INVALID;
+    for (int i = 1; i < argc; ++i) if (!argv[i] || !*argv[i]) return INVALID;
+    return OK;
+}
+
+static Status unsigned_number(const char *s, uintmax_t max, uintmax_t *out)
+{
+    if (!s || !*s || !out) return INVALID;
+    uintmax_t value = 0;
+    for (; *s; ++s) {
+        if (*s < '0' || *s > '9') return INVALID;
+        unsigned digit = (unsigned)(*s - '0');
+        if (digit > max || value > (max - digit) / 10) return RANGE;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return OK;
+}
+
+static Status signed_number(const char *s, intmax_t *out)
+{
+    if (!s || !out) return INVALID;
+    bool negative = *s == '-';
+    if (*s == '+' || negative) ++s;
+    uintmax_t limit = (uintmax_t)INTMAX_MAX + (negative ? 1u : 0u);
+    uintmax_t n;
+    Status st = unsigned_number(s, limit, &n);
+    if (st != OK) return st;
+    if (negative && n != 0) {
+        /* Сначала уменьшаем модуль, чтобы он поместился в знаковый тип. */
+        *out = -(intmax_t)(n - 1) - 1;
+    } else {
+        *out = (intmax_t)n;
+    }
+    return OK;
+}
+
+static Status open_file(const char *path, const char *mode, FILE **out)
+{
+    if (!path || !*path || !mode || !out) return INVALID;
+    *out = fopen(path, mode);
+    return *out ? OK : IO;
+}
+
+static Status close_file(FILE *file, Status status)
+{
+    if (file && fclose(file) == EOF && status == OK) return IO;
+    return status;
+}
+
+static void report(Status status)
+{
+    const char *messages[] = {"ok", "unexpected end of input", "invalid input",
+        "value out of range", "out of memory", "I/O error", "not found",
+        "duplicate value", "operation outside its domain"};
+    if (status != OK && status >= END && status <= DOMAIN)
+        fprintf(stderr, "%s\n", messages[status]);
+}
+
+static int result(Status status)
+{
+    if (status == OK && fflush(stdout) == EOF) status = IO;
+    report(status);
+    return status == OK ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+/* Решение задачи. */
 typedef struct Term {
     intmax_t coefficient;
     unsigned power;
@@ -43,6 +159,7 @@ static Status arithmetic(intmax_t a, intmax_t b, Operation op, intmax_t *out)
     return OK;
 }
 
+/* Объединяем равные степени, степени храним по убыванию. */
 static Status put(Term **poly, intmax_t coefficient, unsigned power, Operation op)
 {
     if (!poly || (op != ADD && op != SUB)) return INVALID;

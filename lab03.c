@@ -1,8 +1,53 @@
-#include "common.h"
-
 #include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+typedef enum {
+    OK, END, INVALID, RANGE, MEMORY, IO, NOT_FOUND, DUPLICATE, DOMAIN
+} Status;
+
+/* Ввод, проверка и обработка ошибок. */
+
+static Status arg_count(int argc, char **argv, int min, int max)
+{
+    if (!argv || argc < min || argc > max) return INVALID;
+    for (int i = 1; i < argc; ++i) if (!argv[i] || !*argv[i]) return INVALID;
+    return OK;
+}
+
+static Status open_file(const char *path, const char *mode, FILE **out)
+{
+    if (!path || !*path || !mode || !out) return INVALID;
+    *out = fopen(path, mode);
+    return *out ? OK : IO;
+}
+
+static Status close_file(FILE *file, Status status)
+{
+    if (file && fclose(file) == EOF && status == OK) return IO;
+    return status;
+}
+
+static void report(Status status)
+{
+    const char *messages[] = {"ok", "unexpected end of input", "invalid input",
+        "value out of range", "out of memory", "I/O error", "not found",
+        "duplicate value", "operation outside its domain"};
+    if (status != OK && status >= END && status <= DOMAIN)
+        fprintf(stderr, "%s\n", messages[status]);
+}
+
+static int result(Status status)
+{
+    if (status == OK && fflush(stdout) == EOF) status = IO;
+    report(status);
+    return status == OK ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+/* Решение задачи. */
 enum { BYTES = 256, NODES = 511 };
 typedef struct { uintmax_t weight; int left, right, byte; } Node;
 typedef struct { int ids[BYTES]; size_t count; } Heap;
@@ -86,6 +131,7 @@ static Status estimate(Estimate *est)
             heap_push(&heap, nodes, count++);
         }
     }
+    /* Два узла с наименьшими частотами становятся детьми нового узла. */
     while (heap.count > 1) {
         int left = heap_pop(&heap, nodes);
         int right = heap_pop(&heap, nodes);
