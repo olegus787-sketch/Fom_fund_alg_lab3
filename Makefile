@@ -2,16 +2,21 @@ CC ?= cc
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra -Wpedantic
 LDLIBS ?= -lm
 BUILD ?= build
-PROGRAMS := $(addprefix $(BUILD)/,lab01 lab02 lab03 lab04 lab05 lab06 lab07 lab08 lab09 lab10)
+SHORT_PROGRAMS := lab1 lab2 lab3 lab4 lab5 lab6 lab7 lab8 lab9
 .PHONY: all clean check memcheck
-all: $(PROGRAMS)
+all: $(SHORT_PROGRAMS) lab10
 $(BUILD):
 	mkdir -p $@
 $(BUILD)/lab%: lab%.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
+$(SHORT_PROGRAMS): lab%: $(BUILD)/lab0%
+	cp "$<" "$@"
+lab10: $(BUILD)/lab10
+	cp "$<" "$@"
 check: all
 	sh tests.sh "$(BUILD)"
 memcheck: all
 	CHECK_MEMORY=1 sh tests.sh "$(BUILD)"
 clean:
 	rm -rf $(BUILD)
+	rm -f $(SHORT_PROGRAMS) lab10

@@ -2,3 +2,5 @@
 /build-san/
 /__pycache__/
 /build-valgrind/
+/lab[1-9]
+/lab10
